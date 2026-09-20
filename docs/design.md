@@ -62,7 +62,7 @@ classDiagram
         +Entities : IReadOnlyCollection~Entity~
         +Simulation()
         +CreateEntity() Entity
-        +Step(delta : TimeSpan)
+        +Step(deltaTime : TimeSpan)
         +Dispose()
     }
 
@@ -89,11 +89,11 @@ classDiagram
         +IsDestroyed : bool
         +Destroy()
         #Component()
-        ~AttachTo(entity : Entity)
-        ~InvokeStart()
+        ~AttachToEntity(entity : Entity)
+        ~InvokeStart(time : SimulationTime)
         ~InvokeUpdate(time : SimulationTime)
         ~InvokeDestroyed()
-        #OnStart()
+        #OnStart(time : SimulationTime)
         #OnUpdate(time : SimulationTime)
         #OnDestroyed()
     }
@@ -145,8 +145,10 @@ the following rules.
   creates one per simulation and passes it to the components that draw from it, in the same way as any other
   simulation-wide object. Two simulations then share no generator, and a run repeats when its generator is seeded
   the same way.
-- **One thread per simulation:** a simulation is not thread-safe, which matches the Update Method's sequential
-  model. Different simulations can run on different threads because they share no state.
+- **One thread at a time:** a simulation is not thread-safe, which matches the Update Method's sequential model,
+  so no two threads may use one simulation at once. It has no thread affinity, so successive calls can come from
+  different threads as long as they do not overlap. Simulations share no state, so any number of them can run in
+  parallel, each on its own thread.
 
 The library cannot stop application code breaking these rules, for example with a static field in a component. The
 documentation for application authors must say so.
@@ -184,7 +186,7 @@ public sealed class Simulation : IDisposable
     public IReadOnlyCollection<Entity> Entities { get; }
 
     public Entity CreateEntity();
-    public void Step(TimeSpan delta);
+    public void Step(TimeSpan deltaTime);
     public void Dispose();
 }
 ```
@@ -199,14 +201,17 @@ public sealed class Simulation : IDisposable
   and one driven by the wall clock passes the real time elapsed. The patterns document explains why a fixed step
   is still the better default: it keeps runs reproducible and numerical methods stable. The library supports both
   and leaves the choice to the application.
-- **`Entities`:** the simulation's entities in creation order. During a step it lists the entities as they were
-  at the start of the step: entities created in the step are not yet included, and destroyed ones are still listed,
-  as described under [Structural changes](#structural-changes). It follows two rules:
+- **`Entities`:** the simulation's entities in creation order. The collection shows the structural changes that
+  have been applied, which during a step is not the same as those that have been requested: a creation or a
+  destruction requested during a step is applied at the end of it, so throughout a step the collection lists the
+  entities as they were when the step began, as described under [Structural changes](#structural-changes).
+  Between steps the two are the same thing, because a change applies as it is made. It follows two rules:
   - **A live view:** the property returns the same read-only collection object on every access, and its `Count` and
-    every new enumeration reflect the current state. A caller that keeps a reference to it never sees stale
-    contents, as with `List<T>.AsReadOnly()` or `Dictionary<TKey, TValue>.Keys`. Returning a copy instead would be
-    a method, such as `GetEntities()`, because the Framework Design Guidelines put copies behind methods; a stored
-    copy would silently go stale.
+    every new enumeration reflect the applied structure at the moment of the call. Live refers to the object and
+    not to pending changes: a caller that keeps a reference to it never sees stale contents, as with
+    `List<T>.AsReadOnly()` or `Dictionary<TKey, TValue>.Keys`. Returning a copy instead would be a method, such
+    as `GetEntities()`, because the Framework Design Guidelines put copies behind methods; a stored copy would
+    silently go stale.
   - **Snapshot enumeration:** each enumeration sees the entities as they were when it began, so creating or
     destroying entities inside a `foreach` over `Entities` is safe and never throws "collection was modified".
     The documentation for `ConcurrentBag<T>` and `ConcurrentQueue<T>` describes their enumerations in the same
@@ -227,10 +232,10 @@ public sealed class Simulation : IDisposable
 - **Disposal:** `Dispose` shuts down every component its entities hold, whether or not they started, so that
   components holding resources, such as an output file, can release them. A disposed simulation cannot step.
 - **Sealed:** applications extend a simulation by composition: by adding entities and components, not by
-  deriving from `Simulation`. MASON's `SimState` and XNA's `Game` are designed to be subclassed; the cost is a base
-  class whose overridable hooks and protected state become part of the library's contract, and model state that
-  components can only reach by casting their simulation to the derived type. Constructor injection, described
-  above, gives components typed access to the same state without either cost.
+  deriving from `Simulation`. XNA's `Game` is designed to be subclassed; the cost is a base class whose
+  overridable hooks and protected state become part of the library's contract, and model state that components
+  can only reach by casting their simulation to the derived type. Constructor injection, described above, gives
+  components typed access to the same state without either cost.
 
 ### `Entity`
 
@@ -283,13 +288,21 @@ public sealed class Entity
   owner to name and nothing to validate:
   - **Destroying twice:** does nothing. Two components can reasonably decide to destroy the same thing in the same
     step, and the first request wins.
-  - **Destroying a component of an already destroyed entity:** does nothing, because the entity's components are
-    being shut down anyway.
+  - **Destroying a component whose entity is already destroyed, or is being destroyed:** does nothing, because
+    the entity's components are being shut down anyway.
+  - **Destroying a component that was never added:** applies at once, setting `IsDestroyed` and running
+    `OnDestroyed`, so that a component which acquired something in its constructor releases it even though it
+    never reached an entity. There is no step to wait for. The component runs the hook itself, having no owner
+    to do it, and can never be added afterwards.
   - **Anyone can call it:** `Destroy` is public, so a component can end its own life, `Destroy()`, or another's,
     `other.Destroy()`. Putting the method on the object says where the effect lands, not who may call it.
-  - **`IsDestroyed` on both:** each type reports whether it has been destroyed, and the flag is set the moment
-    `Destroy` is called, not at the end of the step when the shutdown happens. Destroying an entity sets it on
+  - **`IsDestroyed` on both:** each type reports whether it has been destroyed, and the flag is set when the
+    destruction is applied, not when it is requested. During a step that means at the end of it, just before
+    `OnDestroyed` runs, so the hook sees `true`; between steps it means at once. Destroying an entity sets it on
     every component the entity holds. It never goes back, because destruction is final.
+  - **A requested destruction is not visible:** nothing reports that a `Destroy` call is waiting for the end of
+    the step, so a model that has to act on the request before then records it itself. A member for it is listed
+    under [Deferred features](#deferred-features).
 
   Both return `void`. There is no `bool` to report, because every call either carries out the destruction or finds
   it already done.
@@ -369,12 +382,12 @@ public abstract class Component
 
     public void Destroy();
 
-    internal void AttachTo(Entity entity);
-    internal void InvokeStart();
+    internal void AttachToEntity(Entity entity);
+    internal void InvokeStart(SimulationTime time);
     internal void InvokeUpdate(SimulationTime time);
     internal void InvokeDestroyed();
 
-    protected virtual void OnStart();
+    protected virtual void OnStart(SimulationTime time);
     protected virtual void OnUpdate(SimulationTime time);
     protected virtual void OnDestroyed();
 }
@@ -388,7 +401,7 @@ public abstract class Component
   ```csharp
   internal void InvokeUpdate(SimulationTime time)
   {
-      // Throws if the component has not started, or has been destroyed.
+      // Throws if the component has not started.
 
       OnUpdate(time);
   }
@@ -407,11 +420,14 @@ public abstract class Component
   the present tense because they do the work; `OnDestroyed` is in the past tense because it reacts to a state that
   is already set, as `IsDestroyed` is `true` before it runs. The tear-down hook cannot be called `Stop` or `End`,
   because both are Visual Basic keywords and analyser rule CA1716 flags virtual members named after keywords.
-- **`OnDestroyed` always runs:** every component that was added receives exactly one `OnDestroyed`, even one destroyed
-  before its first step, and even if its `OnStart` threw. So a component can acquire what it needs in its constructor,
-  keeping its fields `readonly` and non-nullable, and release them in `OnDestroyed`. A component that instead acquires
-  something in `OnStart` must write an `OnDestroyed` that tolerates never having started, in the same way that `Dispose`
-  has to cope with a partly constructed object.
+- **`OnDestroyed` always runs:** every component that is destroyed receives exactly one `OnDestroyed`: one destroyed
+  before its first step, one destroyed before it was ever added to an entity, and one whose `OnStart` threw. So a
+  component can acquire what it needs in its constructor, keeping its fields `readonly` and non-nullable, and
+  release them in `OnDestroyed`, which is the only clean-up the library promises to call. A component that instead
+  acquires something in `OnStart` must write an `OnDestroyed` that tolerates never having started, in the same way
+  that `Dispose` has to cope with a partly constructed object. The same applies to `Entity`, which throws for a
+  component destroyed before it was added, so a hook that can run that early releases what the constructor took
+  and reads nothing from its owner.
 - **Components that hold resources:** a component whose fields are disposable will be asked by analyser rule CA1001
   to implement `IDisposable`. The pattern is to put the clean-up in `Dispose`, make it safe to call twice, and have
   `OnDestroyed` call it:
@@ -434,15 +450,20 @@ public abstract class Component
   requires, and nothing should use a component after its `OnDestroyed`. Disposing a component does not destroy it or
   take it out of its entity, so code that disposes one directly should call `Destroy` on it and let `OnDestroyed` do
   the work.
-- **`Entity` is set when the component is added:** `Entity.AddComponent` calls the internal `AttachTo`, which
-  stores the owner in a private field. Applications cannot call `AttachTo`, so `AddComponent` is the only way to set
-  the owner. `AddComponent` calls it before putting the component in any list, so if it throws, the entity is left
-  unchanged.
+- **`Entity` is set when the component is added:** `Entity.AddComponent` calls the internal `AttachToEntity`, which
+  stores the owner in a private field. Applications cannot call `AttachToEntity`, so `AddComponent` is the only
+  way to set the owner. `AddComponent` calls it before putting the component in any list, so if it throws, the
+  entity is left unchanged.
 - **`Entity` is never nullable:** the property throws `InvalidOperationException` until the component has been
-  added. Every hook runs after that, so a nullable property would force a null check that can never fail.
-- **The owner is set once:** `AttachTo` throws if the component already has an owner, which covers adding it to a
-  second entity and re-adding it after it has been destroyed. Destruction never clears the field, so `OnDestroyed` can
-  still reach `Entity.Simulation`.
+  added. `OnStart` and `OnUpdate` run only after that, so for them a nullable property would force a null check
+  that can never fail. `OnDestroyed` is the exception, because a component destroyed before it was added still
+  receives it. Rather than make the property nullable for every caller, the hook is documented as not reading
+  the owner when the component may never have had one; if that proves awkward, the remedy is under
+  [Deferred features](#deferred-features).
+- **The owner is set once:** `AttachToEntity` throws if the component already has an owner, which covers adding it
+  to a second entity and re-adding it after it has been destroyed. It throws for a destroyed component that has
+  no owner too, which is the one destroyed before it was ever added. Destruction never clears the field, so
+  `OnDestroyed` can still reach `Entity.Simulation`.
 - **An abstract class, not an interface:** the library must track each component's owner and lifecycle state, and
   those members must not be implementable, or re-implementable, by applications. An `IComponent` interface would let
   any object claim to be a component while bypassing the bookkeeping. XNA offered both `IGameComponent` and
@@ -459,10 +480,14 @@ public readonly record struct SimulationTime(TimeSpan Elapsed, TimeSpan Delta);
 
 - **Meaning:** an `OnUpdate` call advances its component from `Elapsed` to `Elapsed + Delta`. `Elapsed` is the
   simulated time elapsed at the start of the step, and `Delta` is the length of the step, often written Δt.
+- **`OnStart` receives it too:** a component starts at the beginning of a step and receives that step's time, the
+  same value every `OnUpdate` in that step receives. A component therefore knows the simulated time it started
+  at without reaching through `Entity.Simulation` for the clock.
 - **The only source of the step's length:** a step can have any length, so `OnUpdate` receives it rather than reading
-  a setting. Components must not work out per-step values, such as a per-step failure probability converted from an
-  hourly failure rate, in `OnStart` and reuse them. They compute them in `OnUpdate` from `Delta`, or cache them
-  against the `Delta` they were computed for.
+  a setting. The `Delta` that `OnStart` receives is the length of one step and not of every step, so components
+  must not work out per-step values from it, such as a per-step failure probability converted from an hourly
+  failure rate, and reuse them. They compute them in `OnUpdate` from `Delta`, or cache them against the `Delta`
+  they were computed for.
 - **Value type:** it is small, immutable and created once per step.
 
 ## Lifecycle
@@ -473,8 +498,9 @@ public readonly record struct SimulationTime(TimeSpan Elapsed, TimeSpan Delta);
 stateDiagram-v2
     [*] --> Constructed
     Constructed --> Added : AddComponent
-    Added --> Started : OnStart()
-    Started --> Started : OnUpdate()
+    Constructed --> Destroyed : OnDestroyed()
+    Added --> Started : OnStart(time)
+    Started --> Started : OnUpdate(time)
     Started --> Destroyed : OnDestroyed()
     Added --> Destroyed : OnDestroyed()
     Destroyed --> [*]
@@ -486,10 +512,10 @@ stateDiagram-v2
 - **Started:** `OnUpdate` runs once per step.
 - **Destroyed:** `OnDestroyed` runs when the component is destroyed, its entity is destroyed, or the simulation is
   disposed. It runs whether or not the component started, so a component added and then destroyed before its first
-  step still shuts down.
+  step still shuts down, as does one destroyed before it ever reached an entity.
 
 A component passes through these states once, and it cannot be re-added afterwards. That keeps the contract to two
-sentences: `OnStart` runs at most once, and every component that was added receives exactly one `OnDestroyed`.
+sentences: `OnStart` runs at most once, and every component that is destroyed receives exactly one `OnDestroyed`.
 
 ### One step
 
@@ -500,32 +526,36 @@ sequenceDiagram
     participant E as Entity
     participant C as Component
 
-    App->>Sim: Step(delta)
+    App->>Sim: Step(deltaTime)
     Note over Sim,C: 1. Start components added since the last step
     Sim->>E: start pending components
-    E->>C: InvokeStart()
+    E->>C: InvokeStart(time)
     Note over Sim,C: 2. Update, in creation order
-    loop each entity not destroyed
+    loop each entity
         Sim->>E: update components
         loop each started component
             E->>C: InvokeUpdate(time)
         end
     end
     Note over Sim,C: 3. Apply structural changes requested during the step
-    Sim->>E: shut down destroyed components
-    E->>C: InvokeDestroyed()
+    loop until nothing is pending
+        Sim->>E: shut down destroyed components
+        E->>C: InvokeDestroyed()
+    end
     Sim->>E: join added components
-    Note over Sim: 4. Advance the clock by delta
+    Note over Sim: 4. Advance the clock by deltaTime
 ```
 
 - **Start before any update:** every component that has joined since the last step starts before any component
-  updates. Components that joined together are all in place by then, so a `OnStart` hook can find its siblings.
+  updates. Components that joined together are all in place by then, so an `OnStart` hook can find its siblings.
+  They start in the order they joined, entities in creation order and each entity's components in the order they
+  were added, so the starting order is as fixed and as predictable as the update order.
 - **Order:** entities update in the order they were created, and each entity's components in the order they were
   added. The order is fixed and easy to predict, which keeps runs reproducible. Phases and randomised order are
   discussed under [Deferred features](#deferred-features).
 - **Entity by entity:** each entity updates all its components before the next entity starts. The alternative,
-  updating every entity's first component and then every entity's second, is Mesa's staged activation; it is listed
-  as an open question.
+  updating every entity's first component and then every entity's second, is staged activation; it is listed as
+  an open question.
 
 ### Structural changes
 
@@ -535,12 +565,21 @@ the structure of a simulation is fixed while a step runs:
 - **Additions:** an entity created, or a component added, during a step joins its list at the end of the step.
   Until then, lookups and `Simulation.Entities` leave it out, and it does not update. It starts at the beginning of
   the next step.
-- **Destructions:** a component or entity destroyed during a step stops updating at once but stays in its list
-  until the end of the step, when it is shut down. Until then, lookups and `Simulation.Entities` still include
-  it. A destroyed entity has `IsDestroyed` set at once, so other components can tell that it is going. A component
-  added and destroyed within the same step is shut down at the end of it, without ever starting or updating.
-- **Order at the end of the step:** destroyed objects are shut down first, then additions join, so `OnDestroyed`
-  hooks see the same structure as the step they end.
+- **Destructions:** a component or entity destroyed during a step stays in its list, and goes on updating, until
+  the end of the step, when it is shut down. Until then, lookups and `Simulation.Entities` still include it, and
+  `IsDestroyed` is still `false`, because nothing has been destroyed yet. A component added and destroyed within
+  the same step is shut down at the end of it, without ever starting or updating.
+- **Order at the end of the step:** everything destroyed is shut down first, and the additions join once that
+  has finished, so no `OnDestroyed` hook sees an object that joined during the step.
+- **Shutdown runs in passes:** a pass shuts down everything pending when the pass began, in creation and
+  addition order, as starting and updating do. A hook that destroys something else leaves it for the next pass,
+  and passes repeat until nothing is pending, so a cascade of destructions finishes in the step that started it
+  rather than taking a step for each level. Objects shut down in an earlier pass are therefore gone by the time
+  a later one runs. The order is by pass, and then by creation and addition order within a pass, and it is the
+  same on every run. `Dispose` shuts the simulation's components down the same way.
+- **Teardown that never ends:** an `OnDestroyed` that creates an object and destroys it, whose own hook does the
+  same, gives a step that never finishes. The library does not detect it, in the same way that it does not
+  detect unbounded recursion.
 - **Repeats:** destroying a component or an entity a second time, in the same step or later, does nothing.
 - **Re-entry:** `Step` called from inside a hook throws `InvalidOperationException`.
 - **Changes while enumerating:** any of these changes is safe inside a `foreach` over `Simulation.Entities` or
@@ -550,21 +589,55 @@ the structure of a simulation is fixed while a step runs:
 Deferring both kinds of change has three benefits:
 
 - **Order independence:** every component sees the same siblings and the same entities, wherever it comes in the
-  update order. Without it, a lookup's answer would depend on whether another component's request came earlier in
-  the step.
+  update order, and every component alive when the step began updates exactly once during it. Without this, both
+  a lookup's answer and whether a component updated at all would depend on whether another component's request
+  came earlier in the step.
 - **Safe iteration:** no entity is skipped or visited twice while the lists are being walked. For destruction, this
   is Nystrom's recommendation to mark objects as dead and take them out after the loop.
 - **No mid-step ambiguity:** replacing a component, by destroying the old one and adding the new one, leaves exactly
-  one match for the rest of the step, so single lookups do not throw.
+  one match for the rest of the step, so single lookups do not throw, and the old one keeps the behaviour running
+  until the new one starts.
 
 It has two costs:
 
 - **A component added mid-step cannot be looked up in that step:** composition by constructor injection passes
   references rather than looking them up, so it is unaffected, and `AddComponent` returns the component for code
   that needs it straight away.
-- **A component destroyed mid-step is still found by lookups:** its state is frozen for the rest of the step, so
-  code holding a reference to a component or an entity, such as an injected sibling, checks `IsDestroyed` before
-  using it.
+- **A component destroyed mid-step goes on running:** it is still found by lookups and still receives `OnUpdate`
+  for the rest of the step, and, because the request is not visible, nothing it or its siblings can read says
+  that it is going. The library does not skip the update. Skipping it would make the set of components that
+  update in a step depend on the update order, because only a component destroyed before its turn would lose its
+  update, and it would leave a mid-step replacement covering neither the old component nor the new one for the
+  rest of that step. A model that has to stop a component sooner destroys it at the end of its own `OnUpdate`,
+  or keeps a flag of its own.
+
+### Applying the changes
+
+`Destroy`, `CreateEntity` and `AddComponent` record the request and return. Between steps there is no step to
+wait for, so each change applies as it is made. During a step they wait for the end of it, which works as
+follows.
+
+- **What a request records:** `Destroy` marks the object, and marking it again has no further effect, which is
+  what makes a repeated call do nothing. The mark is private, because `IsDestroyed` reports the applied
+  destruction rather than the request and so cannot serve as the mark.
+- **Finding the work:** a destroyed component tells its entity, and an entity with anything to shut down tells
+  its simulation, so the end of a step that destroyed nothing costs nothing. Looking for marks instead would
+  mean walking every entity whether or not anything happened.
+- **What a pass does:** the simulation visits the entities that have work, in creation order. A destroyed entity
+  shuts down every component it holds, and an entity that survives shuts down the components that are marked,
+  both in addition order. Each of those components has `IsDestroyed` set, receives `OnDestroyed`, and leaves its
+  entity's list together with its key. A destroyed entity leaves the simulation's list once its components have
+  gone.
+- **One shutdown each:** a component can be marked in its own right and belong to an entity that is destroyed in
+  the same step. It is shut down once, because the mark that makes a second `Destroy` do nothing stops the
+  second shutdown as well. This is what keeps the promise that every destroyed component receives exactly one
+  `OnDestroyed`.
+- **Objects that never joined:** a component added and destroyed within the same step, and an entity created and
+  destroyed within it, are shut down by a pass without ever joining a list. Neither starts nor updates, and both
+  receive `OnDestroyed` like anything else, so a component that acquired something before it joined still
+  releases it.
+- **Additions come last:** whatever a hook creates joins once the passes have finished, so a component created
+  during a teardown starts in the next step, like any other addition.
 
 ## Communication between components
 
@@ -594,7 +667,7 @@ It has two costs:
 | The three `On…` hooks            | Protected | Virtual, empty | Only the library calls them                     |
 | `Component.Entity`               | Public    | Non-virtual    | Managed by the library                          |
 | `Destroy` on both                | Public    | Non-virtual    | Anyone may end an object's life; it is final    |
-| `Component.AttachTo`             | Internal  | Non-virtual    | Only `AddComponent` sets the owner              |
+| `Component.AttachToEntity`       | Internal  | Non-virtual    | Only `AddComponent` sets the owner              |
 | The three `Invoke…` methods      | Internal  | Non-virtual    | Enforce the lifecycle before each hook          |
 | `SimulationTime`                 | Public    | n/a (struct)   | Passed to every update                          |
 | Pending changes, lifecycle state | Private   | n/a            | Implementation detail                           |
@@ -604,11 +677,10 @@ and add components, and call `Step`.
 
 ## Namespaces
 
-The workspace convention puts types in `Invicta` unless they mirror a `System` namespace, and none of these do. That
-gives `Invicta.Simulation`, `Invicta.Entity`, `Invicta.Component` and `Invicta.SimulationTime`, in the
-`Invicta.Simulation` assembly. It also avoids the usual problem of a type named after its own namespace: with
-`Invicta.Simulation` as a namespace, the main type would be `Invicta.Simulation.Simulation`, which the
-Framework Design Guidelines advise against.
+The workspace convention prefixes projects with `Invicta.` and takes the root namespace from the project name, so
+the four types sit in `Invicta.Simulation.Primitives`, in the assembly of the same name. Naming the project for
+the primitives it holds also avoids a type named after its own namespace, which the Framework Design Guidelines
+advise against: an `Invicta.Simulation` project would have given `Invicta.Simulation.Simulation`.
 
 ## An application's view
 
@@ -730,16 +802,25 @@ can be added later without breaking code written against the types above.
   - **Independent streams:** experiments with many replications need seeds that are independent of each other, and
     a model may want separate streams per concern, such as one for arrivals and one for failures, so that changing
     one does not shift the other.
-  - **Ordering that draws on it:** shuffled update order, as in MASON and Mesa, needs a generator the library can
-    use, so that feature and this one arrive together.
-- **Update order:** an explicit order value, as in XNA's `UpdateOrder`; phases per step, as in Unity's `LateUpdate`
-  or Mesa's staged activation; or order shuffled with a generator, as in MASON and Mesa.
+  - **Ordering that draws on it:** a shuffled update order needs a generator the library can use, so that feature
+    and this one arrive together.
+- **Update order:** an explicit order value, as in XNA's `UpdateOrder`; phases per step, as in Unity's
+  `LateUpdate`; staged activation, component type by component type; or order shuffled with a generator.
 - **Simultaneous update:** a two-phase compute-then-commit step. For now, components that need it can keep current
   and next values themselves, as Nystrom's Double Buffer describes.
 - **Entity hierarchy:** entities that contain entities, as in Unity's transforms or DEVS coupled models.
 - **Data-driven assembly:** templates that build entities from configuration, as in *Dungeon Siege*.
 - **Messaging:** a message bus on the entity or the simulation.
 - **Entity identity:** a per-simulation ID or name, for output and debugging.
+- **Seeing a requested destruction:** an `IsDestructionRequested` on both types, `true` from the `Destroy` call
+  until the shutdown that sets `IsDestroyed`, so that a component can stop acting, or its siblings can stop
+  using it, before the end of the step. The name follows `CancellationToken.IsCancellationRequested`, which
+  reports a request rather than its effect. It adds a member to both types and a second flag for every author to
+  reason about, so it waits until a model needs it; until then `IsDestroyed` alone says whether an object is
+  gone.
+- **Knowing whether a component is attached:** an `IsAttached` property, or a `TryGetEntity`, for an
+  `OnDestroyed` that has to cope with a component destroyed before it was ever added to an entity. Until then
+  such a hook must not read `Entity`.
 - **Enabling and disabling:** an `Enabled` flag, as XNA and Unity have on components, so that a component keeps its
   state and its place in the order but receives no `OnUpdate` calls. It would also raise the question of whether
   entities can be disabled as a whole.
@@ -769,10 +850,10 @@ These are decisions for you before implementation starts. Each has a recommendat
    units. Recommended: `TimeSpan`.
 2. **Update order:** entity by entity, in creation order, or component type by component type (staged)?
    Recommended: entity by entity for now, adding staged ordering when a model needs it.
-3. **Name clash:** `Invicta.Component` is ambiguous with `System.ComponentModel.Component` in any file that imports
-   both namespaces, which is common in Windows Forms code, for example a visualisation front end. The alternative
-   is a longer name such as `SimulationComponent`. Recommended: keep `Component`, the pattern's own name, and use a
-   using alias where the clash arises.
+3. **Name clash:** `Invicta.Simulation.Primitives.Component` is ambiguous with `System.ComponentModel.Component`
+   in any file that imports both namespaces, which is common in Windows Forms code, for example a visualisation
+   front end. The alternative is a longer name such as `SimulationComponent`. Recommended: keep `Component`, the
+   pattern's own name, and use a using alias where the clash arises.
 4. **Exceptions from hooks:** if `OnUpdate` throws partway through a step, some components have advanced and others
    have not. Recommended: let the exception propagate and mark the simulation as faulted, so that later calls to
    `Step` throw rather than continue from an inconsistent state.

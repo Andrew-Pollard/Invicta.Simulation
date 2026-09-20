@@ -5,9 +5,9 @@
 - When contributing to an existing codebase, its conventions take precedence over everything in this file.
 - Target the latest .NET, with `Nullable` and `ImplicitUsings` enabled and `<AnalysisLevel>10.0-all</AnalysisLevel>`.
   Builds must have no warnings.
-- Name solutions, projects and folders `Invicta.<Area>` (`Invicta.Time`, `Invicta.Time.Tests`) and set
-  `RootNamespace` to `Invicta`. Namespaces mirror the matching `System` namespace: a `TimeProvider` subclass goes
-  in `Invicta`, threading types in `Invicta.Threading`. Folders match namespaces.
+- Prefix solutions/projects with `Invicta.`. Root namespace is the project name. Folders match namespaces.
+  The only exception is when mirroring the .NET system libraries - match the system solution/project/folder
+  names and override `RootNamespace` if necessary.
 - Follow the prevailing folder structure of high-quality C# codebases: currently `src/`, `tests/`, `benchmarks/`
   and `samples/`, with an `.slnx` solution.
 - No top-level statements: executables declare `internal static class Program` with a `private static Main`.

@@ -59,8 +59,6 @@ The pattern appears, under different names, in almost every framework surveyed:
 | [Unreal Engine][unreal]      | `UActorComponent` | `TickComponent`                |
 | [Stride][stride]             | `SyncScript`      | `Update`                       |
 | [Godot][godot]               | `Node`            | `_process`, `_physics_process` |
-| [MASON][mason]               | `Steppable`       | `step(SimState)`               |
-| [Mesa][mesa-activation]      | `Agent`           | `step`                         |
 
 ### Fixed and variable time steps
 
@@ -86,14 +84,12 @@ Every source that goes beyond the basic loop discusses the same few problems.
   objects updated earlier. Nystrom accepts this one-step lag as the price of a deterministic, serialisable state.
   [Jason Gregory][gregory] calls it the "one-frame-off" bug and describes the remedies below.
 - **Remedies for ordering problems:**
-  - **Explicit order:** XNA's `UpdateOrder`, MASON's orderings within a time step, and Unity's script execution order.
-  - **Phases:** several passes per step, such as Unity's `FixedUpdate`, `Update` and `LateUpdate`, Gregory's
-    pre-animation and post-animation phases, and Mesa's staged activation (move, then eat, then reproduce).
-  - **Randomised order:** MASON shuffles agents within an ordering and Mesa's `shuffle_do` shuffles all agents, so
-    that no agent gains a systematic advantage from going first.
+  - **Explicit order:** XNA's `UpdateOrder` and Unity's script execution order.
+  - **Phases:** several passes per step, such as Unity's `FixedUpdate`, `Update` and `LateUpdate`, and Gregory's
+    pre-animation and post-animation phases.
   - **Two-phase, or simultaneous, update:** every object computes its next state from the current one, then all
-    objects commit at once. Mesa calls this simultaneous activation and Nystrom calls it
-    [Double Buffer][nystrom-double]; Gregory describes the related technique of caching each object's previous state.
+    objects commit at once. Nystrom calls this [Double Buffer][nystrom-double]; Gregory describes the related
+    technique of caching each object's previous state.
 - **Changing the collection mid-step:** objects created during a step may or may not update in that step, and
   removing an object can skip its neighbour. Nystrom recommends deferring additions and removals until the step ends.
 - **Inactive objects:** XNA and Unity give each object an `Enabled` flag; Nystrom suggests a separate list of active
@@ -210,10 +206,12 @@ sequenceDiagram
     participant E as Entity
     participant M as Movement
     participant S as Sensor
+    participant B as Behaviour
     loop every time step
         SimLoop->>E: Update(time step)
-        E->>S: Update(time step)
         E->>M: Update(time step)
+        E->>S: Update(time step)
+        E->>B: Update(time step)
     end
 ```
 
@@ -313,10 +311,6 @@ These are the subject of [the design document](design.md).
   David Kelton. The standard text distinguishing next-event and fixed-increment time advance.
 - **[A Comparison of the Accuracy of Discrete Event and Discrete Time][buss]:** Arnold Buss and Ahmed Al Rowaei,
   Winter Simulation Conference 2010. Advantages of time stepping and the effect of step size on results.
-- **[MASON][mason]:** Sean Luke and others, George Mason University. A Java agent-based toolkit whose schedule steps
-  `Steppable` agents in orderings, shuffled within each ordering; see the [manual][mason-manual].
-- **[Mesa agent activation][mesa-activation]:** Python agent-based framework. Sequential, random, simultaneous and
-  staged activation, and why order matters; see also the [Mesa 3 paper][mesa-paper].
 - **[Theory of Modeling and Simulation][zeigler]:** Bernard Zeigler, Alexandre Muzy and Ernesto Kofman,
   third edition 2018. The DEVS formalism of atomic and hierarchically coupled models.
 
@@ -335,11 +329,7 @@ These are the subject of [the design document](design.md).
 [gregory]: https://www.gamedeveloper.com/programming/book-excerpt-game-engine-architecture
 [law]: https://www.averill-law.com/simulation-book/
 [martin]: https://t-machine.org/index.php/2007/09/03/entity-systems-are-the-future-of-mmog-development-part-1/
-[mason]: https://cs.gmu.edu/~eclab/projects/mason/
-[mason-manual]: https://cs.gmu.edu/~eclab/projects/mason/manual.21.pdf
 [mertens]: https://github.com/SanderMertens/ecs-faq
-[mesa-activation]: https://mesa.readthedocs.io/latest/tutorials/2_agent_activation.html
-[mesa-paper]: https://doi.org/10.21105/joss.07668
 [monogame]: https://docs.monogame.net/api/Microsoft.Xna.Framework.GameComponent.html
 [nystrom-component]: https://gameprogrammingpatterns.com/component.html
 [nystrom-double]: https://gameprogrammingpatterns.com/double-buffer.html
