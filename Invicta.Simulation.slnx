@@ -1,5 +1,7 @@
 <Solution>
-  <Folder Name="/samples/" />
+  <Folder Name="/samples/">
+    <Project Path="samples/Invicta.Simulation.Sample/Invicta.Simulation.Sample.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Invicta.Simulation.Primitives/Invicta.Simulation.Primitives.csproj" />
   </Folder>

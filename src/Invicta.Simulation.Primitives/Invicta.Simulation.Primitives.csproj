@@ -2,17 +2,23 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
     <AnalysisLevel>10.0-all</AnalysisLevel>
-    <IsTrimmable>true</IsTrimmable>
-    <IsAotCompatible>true</IsAotCompatible>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <RootNamespace>Invicta.Simulation.Primitives</RootNamespace>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+
+    <Version>0.0.0</Version>
+
+    <Authors>Andrew Pollard</Authors>
+    <Description>TODO</Description>
+    <Copyright>Copyright (c) Andrew Pollard.</Copyright>
+    <PackageProjectUrl>https://github.com/Andrew-Pollard/Invicta.Simulation</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>invicta time windows 10 1803 17134 highresolution timeprovider</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Andrew-Pollard/Invicta.Simulation</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="Invicta.Simulation.Primitives.Tests" />
-  </ItemGroup>
-
+  
 </Project>
